@@ -1,0 +1,9 @@
+{
+  "anthropic_api_key": "",
+  "system_prompt": "",
+  "irc_server": "irc.libera.chat",
+  "irc_port": 7000,
+  "irc_nick": "DrGolang",
+  "irc_password": "",
+  "irc_channels": ["#java.de"]
+}
