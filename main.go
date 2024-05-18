@@ -18,8 +18,9 @@ import (
 const maxTokens = 100
 const maxIRCMessageLength = 420
 const maxContextMessages = 20
-const shortAnswerHint = " (Antwort auf 200 Zeichen begrenzen)"
+const shortAnswerHint = " (limit answer to 200 characters)"
 
+var anthropicClient *anthropic.Client
 var contextMessagesPerChannel = make(map[string][]*ContextMessage)
 
 type Config struct {
@@ -70,57 +71,21 @@ func main() {
 	cfg.SSLConfig = &tls.Config{ServerName: config.IrcServer}
 	cfg.Server = fmt.Sprintf("%s:%d", config.IrcServer, config.IrcPort)
 	cfg.NewNick = func(n string) string { return n + "_" }
-	c := irc.Client(cfg)
 
-	c.HandleFunc(irc.CONNECTED,
-		func(conn *irc.Conn, line *irc.Line) {
-			log.Printf("Connected to %s, identify to NickServ...\n", cfg.Server)
-			conn.Privmsg("NickServ", "IDENTIFY "+config.IrcPassword)
-		})
+	// Create the Anthropic client with the API key from the configuration
+	anthropicClient = anthropic.NewClient(config.AnthropicKey)
 
-	c.HandleFunc(irc.NOTICE,
-		func(conn *irc.Conn, line *irc.Line) {
-			if line.Nick == "NickServ" {
-				log.Printf("NickServ: %s\n", line.Text())
-				if strings.Contains(line.Text(), "You are now identified") {
-					log.Printf("Identified, joining channels...\n")
-					for _, channel := range config.IrcChannels {
-						conn.Join(channel)
-					}
-				}
-			}
-		})
+	ircClient := irc.Client(cfg)
+	ircClient.HandleFunc(irc.CONNECTED, handleConnected(cfg, config))
+	ircClient.HandleFunc(irc.NOTICE, handleNotice(config))
+	ircClient.HandleFunc(irc.PRIVMSG, handlePrivMsg(config))
 
 	// And a signal on disconnect
 	quit := make(chan bool)
-	c.HandleFunc(irc.DISCONNECTED,
-		func(conn *irc.Conn, line *irc.Line) { quit <- true })
+	ircClient.HandleFunc(irc.DISCONNECTED, func(conn *irc.Conn, line *irc.Line) { quit <- true })
 
-	c.HandleFunc(irc.PRIVMSG,
-		func(conn *irc.Conn, line *irc.Line) {
-			log.Printf("PRIVMSG %s: %s\n", line.Target(), line.Text())
-			// if the string starts with the bot's nick and a colon
-			if strings.HasPrefix(line.Text(), conn.Me().Nick+":") {
-				// remove the bot's nick and the colon
-				text := strings.TrimPrefix(line.Text(), conn.Me().Nick+":")
-				// remove leading and trailing whitespace
-				text = strings.TrimSpace(text)
-				// send the message to Anthropic
-				log.Printf("Anthropic: %s\n", text)
-
-				response, err := respond(config, line.Target(), text)
-
-				if err != nil {
-					log.Printf("Error responding to Anthropic: %v\n", err)
-					conn.Privmsg(line.Target(), sanitizeResponse(fmt.Sprintf("Claude had a brainfart: %v", err)))
-				} else {
-					conn.Privmsg(line.Target(), response)
-				}
-			}
-		})
-
-	// Tell client to connect.
-	if err := c.Connect(); err != nil {
+	// Tell irc client to connect.
+	if err := ircClient.Connect(); err != nil {
 		log.Printf("Connection error: %s\n", err.Error())
 	}
 
@@ -128,6 +93,7 @@ func main() {
 	<-quit
 }
 
+// reads the configuration file
 func readConfig(configFile *string) (Config, bool) {
 	// Read the configuration file
 	file, err := os.Open(*configFile)
@@ -135,7 +101,12 @@ func readConfig(configFile *string) (Config, bool) {
 		log.Printf("Error opening config file: %v\n", err)
 		return Config{}, true
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			log.Printf("Failed to close file: %v", err)
+		}
+	}(file)
 
 	// Parse the JSON configuration
 	var config Config
@@ -148,9 +119,56 @@ func readConfig(configFile *string) (Config, bool) {
 	return config, false
 }
 
+// handles CONNECTED events
+func handleConnected(cfg *irc.Config, config Config) func(conn *irc.Conn, line *irc.Line) {
+	return func(conn *irc.Conn, line *irc.Line) {
+		log.Printf("Connected to %s, identify to NickServ...\n", cfg.Server)
+		conn.Privmsg("NickServ", "IDENTIFY "+config.IrcPassword)
+	}
+}
+
+// handles NOTICE events
+func handleNotice(config Config) func(conn *irc.Conn, line *irc.Line) {
+	return func(conn *irc.Conn, line *irc.Line) {
+		if line.Nick == "NickServ" {
+			log.Printf("NickServ: %s\n", line.Text())
+			if strings.Contains(line.Text(), "You are now identified") {
+				log.Printf("Identified, joining channels...\n")
+				for _, channel := range config.IrcChannels {
+					conn.Join(channel)
+				}
+			}
+		}
+	}
+}
+
+// handles PRIVMSG events
+func handlePrivMsg(config Config) func(conn *irc.Conn, line *irc.Line) {
+	return func(conn *irc.Conn, line *irc.Line) {
+		log.Printf("PRIVMSG %s: %s\n", line.Target(), line.Text())
+		// if the string starts with the bot's nick and a colon
+		if strings.HasPrefix(line.Text(), conn.Me().Nick+":") {
+			// remove the bot's nick and the colon
+			text := strings.TrimPrefix(line.Text(), conn.Me().Nick+":")
+			// remove leading and trailing whitespace
+			text = strings.TrimSpace(text)
+			// send the message to Anthropic
+			log.Printf("Anthropic: %s\n", text)
+
+			response, err := respond(config, line.Target(), text)
+
+			if err != nil {
+				log.Printf("Error responding to Anthropic: %v\n", err)
+				conn.Privmsg(line.Target(), sanitizeResponse(fmt.Sprintf("Claude had a brainfart: %v", err)))
+			} else {
+				conn.Privmsg(line.Target(), response)
+			}
+		}
+	}
+}
+
+// responds to a user message using the Anthropic API
 func respond(config Config, channel, text string) (string, error) {
-	// Create the Anthropic client with the API key from the configuration
-	client := anthropic.NewClient(config.AnthropicKey)
 
 	// Get the context messages for the current channel
 	contextMessages, ok := contextMessagesPerChannel[channel]
@@ -208,7 +226,7 @@ func respond(config Config, channel, text string) (string, error) {
 		}
 	}
 
-	resp, err := client.CreateMessages(
+	resp, err := anthropicClient.CreateMessages(
 		context.Background(),
 		anthropic.MessagesRequest{
 			Model:     anthropic.ModelClaude3Haiku20240307,
