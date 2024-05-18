@@ -65,22 +65,22 @@ func main() {
 		return
 	}
 
-	// Or, create a config and fiddle with it first:
-	cfg := irc.NewConfig(config.IrcNick, config.IrcNick, config.IrcNick)
-	cfg.SSL = true
-	cfg.SSLConfig = &tls.Config{ServerName: config.IrcServer}
-	cfg.Server = fmt.Sprintf("%s:%d", config.IrcServer, config.IrcPort)
-	cfg.NewNick = func(n string) string { return n + "_" }
-
 	// Create the Anthropic client with the API key from the configuration
 	anthropicClient = anthropic.NewClient(config.AnthropicKey)
 
-	ircClient := irc.Client(cfg)
-	ircClient.HandleFunc(irc.CONNECTED, handleConnected(cfg, config))
+	// Create irc client configuration
+	ircConfig := irc.NewConfig(config.IrcNick, config.IrcNick, config.IrcNick)
+	ircConfig.SSL = true
+	ircConfig.SSLConfig = &tls.Config{ServerName: config.IrcServer}
+	ircConfig.Server = fmt.Sprintf("%s:%d", config.IrcServer, config.IrcPort)
+	ircConfig.NewNick = func(n string) string { return n + "_" }
+
+	ircClient := irc.Client(ircConfig)
+	ircClient.HandleFunc(irc.CONNECTED, handleConnected(ircConfig, config))
 	ircClient.HandleFunc(irc.NOTICE, handleNotice(config))
 	ircClient.HandleFunc(irc.PRIVMSG, handlePrivMsg(config))
 
-	// And a signal on disconnect
+	// Create a signal on disconnect to wait for
 	quit := make(chan bool)
 	ircClient.HandleFunc(irc.DISCONNECTED, func(conn *irc.Conn, line *irc.Line) { quit <- true })
 
